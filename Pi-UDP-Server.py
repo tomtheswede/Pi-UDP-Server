@@ -1,50 +1,61 @@
 import socket, os, time, select
+from datetime import datetime
 
 #Global variables
 PORT=5007
 IP=""
-sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(('',PORT))
+MAC=""
 entryNum=0
+devicelog=[]
 resetCalCheck=True
+currentTime=0
+dayTime=0
 
-#File presence checks
-if os.path.isfile("deviceLog.txt")==0:
-    log=open("deviceLog.txt","a") #create if doesn't exist
-    log.close()
-    print("deviceLog.txt file created.")
-if os.path.isfile("calendarOutput.txt")==0:
-    log=open("calendarOutput.txt","a") #create if doesn't exist
-    log.close()
-    print("calendarOutput.txt file created.")
-if os.path.isfile("msgLog.txt")==0:
-    log=open("msgLog.txt","a") #create if doesn't exist
-    log.close()
-    print("msgLog.txt file created.")
-if os.path.isfile("actionList.txt")==0:
-    log=open("actionList.txt","a") #create if doesn't exist
-    log.close()
-    print("actionList.txt file created.")
-
-def getLocalIP():
+def refreshLocalIP():
+    global IP, MAC
     gw = os.popen("ip -4 route show default").read().split()
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect((gw[2], 0))
     ipAddr = s.getsockname()[0]
-    print("Local IP is ",ipAddr)
-    return ipAddr;
+    IP=ipAddr
+    try:
+        MACstring=open('/sys/class/net/eth0/address').read() #Device selected here - may also want wlan0 instead of eth0
+    except:
+        MACstring='00:00:00:00:00:00'
+    MAC=MACstring[0:17]
+    print("Local IP is",IP," with MAC of" + MAC)
+
+def appraiseDeviceLog():
+    global deviceLog, IP, MAC
+    nowTime=str(currentTime)
+    if os.path.isfile("deviceLog.txt")==0:
+        log=open("deviceLog.txt","a") #create if doesn't exist
+        registerLines='0,0,'+IP+','+MAC+',1,1,'+nowTime+',Main Server\n'\
+            '1,1,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Date time\n'\
+            '2,2,'+IP+','+MAC+','+str(dayTime)+',1,'+nowTime+',Day time\n'\
+            '3,3,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Solar azimuth\n'\
+            '4,4,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Solar altitude\n'\
+            '5,5,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Lunar azimuth\n'\
+            '6,6,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Lunar altitude\n'\
+            '7,7,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Sun rise/set\n'
+        log.write(registerLines)
+        log.close()
+        print("deviceLog.txt file created.")
+    with open("deviceLog.txt") as textFile:
+        deviceLog = [line.split('\n')[0] for line in textFile]
+    #print (deviceLog)
+    
 
 #First run routine to show last logged items and IP addy
-def setupLog():
+def appraiseMsgLog():
+    if os.path.isfile("msgLog.txt")==0:
+        log=open("msgLog.txt","a") #create if doesn't exist
+        log.close()
+        print("New msgLog.txt file created.")
     global entryNum
-    global IP
-    print("Initiallizing...")
-    IP=getLocalIP()    #Temporary removal for windows use
-    regDevice('0','0',IP)
     with open("msgLog.txt") as textFile:
         readLines = [line.split('\n\n')[0] for line in textFile]
-    if len(readLines)==1 or len(readLines)==0:
-        print("Blank msgLog.txt found.")
+    if len(readLines)==1 or len(readLines)==0:  #Could be reviewed for accuracy------------------
         entryNum=0
     else:
         if len(readLines)==2:
@@ -62,30 +73,233 @@ def setupLog():
         print("First line stored: " + firstLine)
         print("Last line stored: " + lastLine)
         entryNum=int(lastLine.split(',')[0])
-    print("---- Now receiving on IP " + str(IP) + " at port " + str(PORT) + " ----")
+    
 
-def waitForMessage(): #Primes a message if available
+def checkForMessage(): #Primes a message if available
     global sock
     sockReady=select.select([sock],[],[],0.1) #[True,True]
     if sockReady[0]:
         print("")
-        print("Socket received data")
-        message=getMessage()
-    else:
-        message=""
-    return message;
+        #print("Socket received data")
+        data, addr=sock.recvfrom(256) #Receiving the data from the buffer
+        addr=str(addr) #convert to string
+        pos2=addr.index("'",3)
+        devIP=addr[2:pos2] #trim 4 digit port number
+        data=str(data) #change to string
+        print("-- Raw incoming message:",data)
+        message=data[2:-1]+','+devIP #strip the b character - Used to have the devIP in as well
+        processMessage(message)
+        
 
-def getMessage():
+def processMessage(data):
+    #Split the message
+    if data.count(',')==0:
+        print("No commas in received message: " + data)
+        return #exits the function
+    elif data.count(',')==3: #breaking out the message
+        msgType,devID,msg,devIP=data.split(",") #form at is {IP,type,ID,message}
+        logMsg(msgType,devID,msg)
+    else:
+        print("Invalid message recieved: " + data)
+        return #exits the function
+    #Take action on the messages
+    if msgType=="0": #Register
+        regDevice(devID,msg,devIP,'Newly regisered device')      
+    else:
+        if getIpFromId(devID)=="Empty IP":
+            print("Message not processed since device ID",devID,"is not registered.")
+        else:
+            logRecent(devID,msg,devIP)
+            actionListComparision(devID)
+        
+
+def actionListComparision(devID):
+    with open("actionList.txt") as textFile:
+        lines = [line.split('\n\n')[0] for line in textFile]
+    for i in range(0,len(lines)):
+        #print(lines[i][:-1])
+        actionSplit=lines[i][:-1].split(":")
+        #print(actionSplit)
+        #print(actionSplit[1].split(",")[0])
+        if devID==actionSplit[1].split(",")[0]:
+            conditionSplit=actionSplit[2].split(";")
+            #print(conditionSplit)
+            meetsCondition=True
+            for condition in conditionSplit:
+                condElements=condition.split(",")
+                lastValue=getLastValue(condElements[1])
+                #if condition[0]=="0" #Match anything doesn't need logic because always true
+                if condition[0]=="1": #Equals
+                    #print("equal triggered",condElements[2],getLastValue(condElements[1]))
+                    if not condElements[2]==lastValue:
+                        meetsCondition=False
+                elif condition[0]=="2": #Not equal
+                    #print("equal triggered",condElements[2],getLastValue(condElements[1]))
+                    if condElements[2]==lastValue:
+                        meetsCondition=False
+                elif condition[0]=="3": #less than
+                    if lastValue.isdigit():
+                        if condElements[2].isdigit():
+                            #print(int(lastValue),int(condElements[2]))
+                            if not int(lastValue)<int(condElements[2]):
+                                meetsCondition=False
+                        else:
+                            meetsCondition=False
+                            print("Action list item",actionSplit[0],"does not have a valid int for less than comparison")
+                    else:
+                        meetsCondition=False
+                        print("Last value for device",condElements[1],"is not a valid int for less than comparison")
+                elif condition[0]=="4": #less than or equal
+                    if lastValue.isdigit():
+                        if condElements[2].isdigit():
+                            #print(int(lastValue),int(condElements[2]))
+                            if not int(lastValue)<=int(condElements[2]):
+                                meetsCondition=False
+                        else:
+                            meetsCondition=False
+                            print("Action list item",actionSplit[0],"does not have a valid int for less than or equal to comparison")
+                    else:
+                        meetsCondition=False
+                        print("Last value for device",condElements[1],"is not a valid int for less than or equal to comparison")
+                elif condition[0]=="5": #greater than
+                    if lastValue.isdigit():
+                        if condElements[2].isdigit():
+                            #print(int(lastValue),int(condElements[2]))
+                            if not int(lastValue)>int(condElements[2]):
+                                meetsCondition=False
+                        else:
+                            meetsCondition=False
+                            print("Action list item",actionSplit[0],"does not have a valid int for greater than comparison")
+                    else:
+                        meetsCondition=False
+                        print("Last value for device",condElements[1],"is not a valid int for greater than comparison")
+                elif condition[0]=="6": #greater than or equal
+                    if lastValue.isdigit():
+                        if condElements[2].isdigit():
+                            #print(int(lastValue),int(condElements[2]))
+                            if not int(lastValue)>=int(condElements[2]):
+                                meetsCondition=False
+                        else:
+                            meetsCondition=False
+                            print("Action list item",actionSplit[0],"does not have a valid int for greater than or equal to comparison")
+                    else:
+                        meetsCondition=False
+                        print("Last value for device",condElements[1],"is not a valid int for greater than or equal to comparison")
+            if meetsCondition:
+                if actionSplit[3].count(';')==0:
+                    print('- Rule number',actionSplit[0],'triggered with a single action.')
+                    to=actionSplit[3].split(',')
+                    sendUdp('16',to[0],to[1])
+                else:
+                    print('- Rule number',actionSplit[0],'triggered with multiple actions.')
+                    actions=actionSplit[3].split(';')
+                    for j in range(0,len(actions)):
+                        to=actions[j].split(',')
+                        sendUdp('16',to[0],to[1])
+
+def sendUdp(msgType,toID,msg):
     global sock
-    data, addr=sock.recvfrom(256) #Receiving the data from the buffer
-    addr=str(addr) #convert to string
-    pos2=addr.index("'",3)
-    devIP=addr[2:pos2] #trim 4 digit port number
-    data=str(data) #change to string
-    message=data[2:-1]+','+devIP #strip the b character - Used to have the devIP in as well
-    print("-- Raw incoming message:",data)
-    #print("Output:",message)
-    return message;
+    #print(toID)
+    toIP=getIpFromId(toID)
+    if toIP=="Empty IP":
+        print("No IP available for sending UDP to",toID)
+    else:
+        sendData=toID + "," + msg
+        sendthis=sendData.encode('utf-8') #Changing type
+        #print(toIP,PORT)
+        sock.sendto(sendthis,(toIP,PORT))
+        print("-- Sent UDP message:", sendData)
+        logMsg(msgType,toID,msg)
+
+def getIpFromId(devID):
+    global deviceLog
+    outIP = "Empty IP" #No IP by default
+    for line in deviceLog:
+        #print("Finding IP for this dev:",devID,line.split(',')[0])
+        if line.split(',')[0]==devID:
+            outIP=line.split(",")[2]
+            break
+    #print('Returned this IP from input ID:',devID,outIP)
+    return outIP;
+
+def getMacFromIP(devIP):
+    global deviceLog
+    outMAC = "Empty Mac" #No IP by default
+    for line in deviceLog:
+        #print("Finding IP for this dev:",devID,line.split(',')[0])
+        if line.split(',')[2]==devIP:
+            outMAC=line.split(",")[3]
+            break
+    #print('Returned this MAC from input IP:',devIP,outMAC)
+    return outMAC;
+
+def getLastValue(devID):
+    global deviceLog
+    output="Empty value"
+    for line in deviceLog:
+        logSplit=line.split(",")
+        #print("Getting last value: ",logSplit[0],devID)
+        if logSplit[0]==devID:
+            output=logSplit[4];
+    #print('Returned this Value from input ID:',devID,output)
+    return output;
+
+def logMsg(msgType,devID,msg):
+    global entryNum
+    entryNum = entryNum + 1
+    logData=str(entryNum) + "," + str(currentTime) + "," + msgType + "," + devID + "," + msg + "\n"
+    log=open("msgLog.txt","a")
+    log.write(logData)
+    log.close()
+    print("--- Message logged: " + logData[:-1])
+
+def logRecent(devID,msg,devIP):
+    global deviceLog
+    for i in range(0,len(deviceLog)):
+        logSplit=deviceLog[i].split(",")
+        if logSplit[0]==devID:
+            deviceLog[i]=logSplit[0]+','+logSplit[1]+','+devIP+','+logSplit[3]+','+msg+','+'1'+','+str(currentTime)+ ',' + logSplit[7]
+            print("Updated a registered device's recent state:", logSplit[0])
+            if logSplit[5]=='0':
+                print("Offline device has returned to the network with ID: ", devID)
+            if logSplit[2]!=devIP:
+                #print(logSplit[2],"  ",devIP)
+                print("IP address has changed for the device with ID: ", devID)
+    log=open("deviceLog.txt","w")
+    for line in deviceLog:
+        log.write(line + '\n')
+    log.close()
+    #print('Full device log:',deviceLog)
+
+def regDevice(devID,msg,devIP,devName):
+    global deviceLog
+    noMatch = True
+    for i in range(0,len(deviceLog)):
+        logSplit=deviceLog[i].split(",")
+        if logSplit[0]==devID:
+            if logSplit[2]==devIP:
+                print("Registration logged as existing device for this device:",devID)
+                deviceLog[i]=devID+','+msg+','+devIP+','+logSplit[3]+','+msg+','+'1'+','+str(currentTime) + ',' + logSplit[7]
+                #More can be put here to distinguish the difference between new devices and existing devices. also on/offline statuses
+            else:
+                print("Logged this device with a new IP:", devID)
+                deviceLog[i]=devID+','+msg+','+devIP+','+'No mac yet'+','+msg+','+'1'+','+str(currentTime) + ',' + devName
+            noMatch = False
+    if noMatch:
+        deviceLog.append(devID+','+msg+','+devIP+','+'No mac yet'+','+msg+','+'1'+','+str(currentTime) + ',' + devName)
+        print("Logged a new unique device with devID:", devID)
+    log=open("deviceLog.txt","w")
+    for line in deviceLog:
+        log.write(line + '\n')
+    log.close()
+
+def setTimes():
+    global currentTime, dayTime
+    curTime=datetime.now()
+    dayTime=int((curTime-curTime.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds())
+    currentTime=int(time.time()+time.altzone)
+
+#---not used yet
 
 def scheduledEventGet():
     global resetCalCheck
@@ -112,133 +326,7 @@ def scheduledEventGet():
         cal.close()
     return message;
 
-def processMessage(data):
-    #Split the message
-    msgType=""
-    if data.count(',')==0:
-        pass
-    elif data.count(',')==3: #breaking out the message
-        dataSplit=data.split(",") #form at is {IP,type,ID,message}
-        msgType=dataSplit[0]
-        devID=dataSplit[1]
-        msg=dataSplit[2]
-        devIP=dataSplit[3]
-        logMsg(msgType,devID,msg)
-    else:
-        print("Invalid message recieved: " + data)
-    #Take action on the messages
-    if msgType=="0":
-        regDevice(devID,msg,devIP)
-    elif msgType!="0":
-        logRecent(devID,msg,devIP)
-        with open("actionList.txt") as textFile:
-            lines = [line.split('\n\n')[0] for line in textFile]
-        for i in range(0,len(lines)):
-            #print(lines[i][:-1])
-            actionSplit=lines[i][:-1].split(":")
-            #print(actionSplit)
-            #print(actionSplit[1].split(",")[0])
-            if devID==actionSplit[1].split(",")[0]:
-                conditionSplit=actionSplit[2].split(";")
-                #print(conditionSplit)
-                meetsCondition=True
-                for condition in conditionSplit:
-                    condElements=condition.split(",")
-                    lastValue=getLastValue(condElements[1])
-                    #if condition[0]=="0" #Match anything doesn't need logic because always true
-                    if condition[0]=="1": #Equals
-                        #print("equal triggered",condElements[2],getLastValue(condElements[1]))
-                        if not condElements[2]==lastValue:
-                            meetsCondition=False
-                    elif condition[0]=="2": #Not equal
-                        #print("equal triggered",condElements[2],getLastValue(condElements[1]))
-                        if condElements[2]==lastValue:
-                            meetsCondition=False
-                    elif condition[0]=="3": #less than
-                        if lastValue.isdigit():
-                            if condElements[2].isdigit():
-                                #print(int(lastValue),int(condElements[2]))
-                                if not int(lastValue)<int(condElements[2]):
-                                    meetsCondition=False
-                            else:
-                                meetsCondition=False
-                                print("Action list item",actionSplit[0],"does not have a valid int for less than comparison")
-                        else:
-                            meetsCondition=False
-                            print("Last value for device",condElements[1],"is not a valid int for less than comparison")
-                    elif condition[0]=="4": #less than or equal
-                        if lastValue.isdigit():
-                            if condElements[2].isdigit():
-                                #print(int(lastValue),int(condElements[2]))
-                                if not int(lastValue)<=int(condElements[2]):
-                                    meetsCondition=False
-                            else:
-                                meetsCondition=False
-                                print("Action list item",actionSplit[0],"does not have a valid int for less than or equal to comparison")
-                        else:
-                            meetsCondition=False
-                            print("Last value for device",condElements[1],"is not a valid int for less than or equal to comparison")
-                    elif condition[0]=="5": #greater than
-                        if lastValue.isdigit():
-                            if condElements[2].isdigit():
-                                #print(int(lastValue),int(condElements[2]))
-                                if not int(lastValue)>int(condElements[2]):
-                                    meetsCondition=False
-                            else:
-                                meetsCondition=False
-                                print("Action list item",actionSplit[0],"does not have a valid int for greater than comparison")
-                        else:
-                            meetsCondition=False
-                            print("Last value for device",condElements[1],"is not a valid int for greater than comparison")
-                    elif condition[0]=="6": #greater than or equal
-                        if lastValue.isdigit():
-                            if condElements[2].isdigit():
-                                #print(int(lastValue),int(condElements[2]))
-                                if not int(lastValue)>=int(condElements[2]):
-                                    meetsCondition=False
-                            else:
-                                meetsCondition=False
-                                print("Action list item",actionSplit[0],"does not have a valid int for greater than or equal to comparison")
-                        else:
-                            meetsCondition=False
-                            print("Last value for device",condElements[1],"is not a valid int for greater than or equal to comparison")
-                if meetsCondition:
-                    if actionSplit[3].count(';')==0:
-                        print('- Rule number',actionSplit[0],'triggered with a single action.')
-                        to=actionSplit[3].split(',')
-                        sendUdp(to[0],to[1])
-                    else:
-                        print('- Rule number',actionSplit[0],'triggered with multiple actions.')
-                        actions=actionSplit[3].split(';')
-                        for j in range(0,len(actions)):
-                            to=actions[j].split(',')
-                            sendUdp(to[0],to[1])
-        
 
-def sendUdp(toID,msg):
-    global sock
-    #print(toID)
-    toIP=getIpFromId(toID)
-    if toIP=="":
-        print("No IP available for sending to",toID)
-    else:
-        sendData=toID + "," + msg
-        sendthis=sendData.encode('utf-8') #Changing type
-        #print(toIP,PORT)
-        sock.sendto(sendthis,(toIP,PORT))
-        print("-- Sent message:", sendData)
-        logMsg("5",toID,msg)
-        
-def getLastValue(devID):
-    output="Empty"
-    with open("deviceLog.txt") as textFile:
-        lines = [line.split('\n\n')[0][:-1] for line in textFile]
-    for line in lines:
-        logSplit=line.split(",")
-        #print("Getting last value: ",logSplit[0],devID)
-        if logSplit[0]==devID:
-            output=logSplit[4];
-    return output;
 
 def getLastValueTime(devID):
     output="Empty"
@@ -250,76 +338,34 @@ def getLastValueTime(devID):
             output=logSplit[6];
     return output;
 
-def getIpFromId(devID):
-    with open("deviceLog.txt") as textFile:
-        lines = [line.split('\n\n')[0][:-1] for line in textFile]
-    #print(lines)
-    outIP = "" #No IP by default
-    for line in lines:
-        #print("Finding IP for this dev:",devID,line.split(',')[0])
-        if line.split(',')[0]==devID:
-            outIP=line.split(",")[2]
-            break
-    return outIP;
 
-def logMsg(msgType,devID,msg):
-    global entryNum
-    entryNum = entryNum + 1
-    logData=str(entryNum) + "," + time.strftime("%Y-%m-%d")+" "+time.strftime("%H:%M:%S") + "," + msgType + "," + devID + "," + msg + "\n"
-    log=open("msgLog.txt","a")
-    log.write(logData)
-    log.close()
-    print("--- Message logged: " + logData[:-1])
+#Setup lines
+setTimes()
+refreshLocalIP()
 
-def logRecent(devID,msg,devIP):
-    with open("deviceLog.txt") as textFile:
-        lines = [line.split('\n\n')[0] for line in textFile]
-    for i in range(0,len(lines)):
-        logSplit=lines[i].split(",")
-        if logSplit[0]==devID:
-            lines[i]=logSplit[0]+','+logSplit[1]+','+devIP+','+logSplit[3]+','+msg+','+'online'+','+time.strftime("%Y-%m-%d")+' '+time.strftime("%H:%M:%S") + ',' + logSplit[7]
-            print("Updated a registered device's recent state:", logSplit[0])
-            if logSplit[5]=='offline':
-                print("Offline device has returned to the network with ID: ", devID)
-            if logSplit[2]!=devIP:
-                print(logSplit[2],"  ",devIP)
-                print("IP address has changed for the device with ID: ", devID)
-    log=open("deviceLog.txt","w")
-    for line in lines:
-        log.write(line)
+#File presence checks
+if os.path.isfile("calendarOutput.txt")==0:
+    log=open("calendarOutput.txt","a") #create if doesn't exist
     log.close()
+    print("calendarOutput.txt file created.")
+if os.path.isfile("actionList.txt")==0:
+    log=open("actionList.txt","a") #create if doesn't exist
+    log.close()
+    print("actionList.txt file created.")
+appraiseDeviceLog()
+appraiseMsgLog()
+    
 
-def regDevice(devID,msg,devIP):
-    with open("deviceLog.txt") as textFile:
-        lines = [line.split('\n\n')[0] for line in textFile]
-    noMatch = True
-    for i in range(0,len(lines)):
-        logSplit=lines[i].split(",")
-        if logSplit[0]==devID:
-            if logSplit[2]==devIP and logSplit[5]=='online':
-                print("Registration logged as existing device for this device:",devID)
-                #More can be put here to distinguish the difference between new devices and existing devices. also on/offline statuses
-            else:
-                print("Logged this new or rarely seen device's registration state:", logSplit[0])
-            lines[i]=devID+','+msg+','+devIP+','+'No mac'+','+msg+','+'online'+','+time.strftime("%Y-%m-%d")+' '+time.strftime("%H:%M:%S") + ',' + logSplit[7]
-            noMatch = False
-    log=open("deviceLog.txt","w")
-    for line in lines:
-        log.write(line)
-    if noMatch:
-        log.write(devID+','+msg+','+devIP+','+'No mac'+','+msg+','+'online'+','+time.strftime("%Y-%m-%d")+' '+time.strftime("%H:%M:%S")+','+'Un-named device'+'\n')
-        print("Logged a new unique device with devID:", devID)
-    log.close()
+#General UDP setup
+sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('',PORT))
+print("---- Now receiving on IP " + str(IP) + " at port " + str(PORT) + " ----")
+#log msg to show server is online
 
 
 #Log what is read and occasionally respond
-setupLog()
 while True:
-    msgData=waitForMessage()
-    #if msgData=="":
-    #    msgData=scheduledEventGet()
-
-    #process data when available
-    if msgData!="":
-        processMessage(msgData)
+    setTimes()
+    checkForMessage()
+    
 
