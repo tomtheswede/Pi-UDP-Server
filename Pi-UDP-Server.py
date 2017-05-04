@@ -7,13 +7,13 @@ IP=""
 MAC=""
 entryNum=0
 devicelog=[]
-resetCalCheck=True
 currentTime=0
 dayTime=0
+lastScheduleCheckTime=0
 
 def refreshLocalIP():
     global IP, MAC
-    gw = os.popen("ip -4 route show default").read().split()
+    gw = os.popen("ip -4 route show default").read().split() #Some work here required to track network accessibility status
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect((gw[2], 0))
     ipAddr = s.getsockname()[0]
@@ -33,11 +33,13 @@ def appraiseDeviceLog():
         registerLines='0,0,'+IP+','+MAC+',1,1,'+nowTime+',Main Server\n'\
             '1,1,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Date time\n'\
             '2,2,'+IP+','+MAC+','+str(dayTime)+',1,'+nowTime+',Day time\n'\
-            '3,3,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Solar azimuth\n'\
-            '4,4,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Solar altitude\n'\
-            '5,5,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Lunar azimuth\n'\
-            '6,6,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Lunar altitude\n'\
-            '7,7,'+IP+','+MAC+','+nowTime+',1,'+nowTime+',Sun rise/set\n'
+            '3,3,'+IP+','+MAC+','+'1'+',1,'+nowTime+',Network access\n'\
+            '4,4,'+IP+','+MAC+','+'1'+',1,'+nowTime+',Internet access\n'\
+            '5,5,'+IP+','+MAC+','+str(123)+',1,'+nowTime+',Solar azimuth\n'\
+            '6,6,'+IP+','+MAC+','+str(23)+',1,'+nowTime+',Solar altitude\n'\
+            '7,7,'+IP+','+MAC+','+str(3)+',1,'+nowTime+',Lunar azimuth\n'\
+            '8,8,'+IP+','+MAC+','+str(13)+',1,'+nowTime+',Lunar altitude\n'\
+            '9,9,'+IP+','+MAC+','+str(9)+',1,'+nowTime+',Sun rise/set\n'
         log.write(registerLines)
         log.close()
         print("deviceLog.txt file created.")
@@ -48,13 +50,13 @@ def appraiseDeviceLog():
 
 #First run routine to show last logged items and IP addy
 def appraiseMsgLog():
+    global entryNum
     if os.path.isfile("msgLog.txt")==0:
         log=open("msgLog.txt","a") #create if doesn't exist
         log.close()
-        print("New msgLog.txt file created.")
-    global entryNum
+        print("New msgLog.txt file created.")    
     with open("msgLog.txt") as textFile:
-        readLines = [line.split('\n\n')[0] for line in textFile]
+        readLines = [line.split('\n')[0] for line in textFile]
     if len(readLines)==1 or len(readLines)==0:  #Could be reviewed for accuracy------------------
         entryNum=0
     else:
@@ -104,7 +106,9 @@ def processMessage(data):
         return #exits the function
     #Take action on the messages
     if msgType=="0": #Register
-        regDevice(devID,msg,devIP,'Newly regisered device')      
+        regDevice(devID,msg,devIP,'Newly regisered device')
+    elif msgType=="12": #Scheduled message without
+        actionListComparison(devID)
     else:
         if getIpFromId(devID)=="Empty IP":
             print("Message not processed since device ID",devID,"is not registered.")
@@ -115,7 +119,7 @@ def processMessage(data):
 
 def actionListComparision(devID):
     with open("actionList.txt") as textFile:
-        lines = [line.split('\n\n')[0] for line in textFile]
+        lines = [line.split('\n')[0] for line in textFile]
     for i in range(0,len(lines)):
         #print(lines[i][:-1])
         actionSplit=lines[i][:-1].split(":")
@@ -189,13 +193,13 @@ def actionListComparision(devID):
                 if actionSplit[3].count(';')==0:
                     print('- Rule number',actionSplit[0],'triggered with a single action.')
                     to=actionSplit[3].split(',')
-                    sendUdp('16',to[0],to[1])
+                    sendUdp('11',to[0],to[1])
                 else:
                     print('- Rule number',actionSplit[0],'triggered with multiple actions.')
                     actions=actionSplit[3].split(';')
                     for j in range(0,len(actions)):
                         to=actions[j].split(',')
-                        sendUdp('16',to[0],to[1])
+                        sendUdp('11',to[0],to[1])
 
 def sendUdp(msgType,toID,msg):
     global sock
@@ -297,64 +301,56 @@ def setTimes():
     global currentTime, dayTime
     curTime=datetime.now()
     dayTime=int((curTime-curTime.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds())
-    currentTime=int(time.time()+time.altzone)
+    currentTime=int(time.time())
+    
 
-#---not used yet
-
-def scheduledEventGet():
-    global resetCalCheck
-    global IP
-    message=""
-    if int(time.strftime('%-S'))%25==0:
-        resetCalCheck=True
-    if int(time.strftime('%-S'))%26==0 and resetCalCheck==True: #trigger every remainder minutes
-        resetCalCheck=False
-        cal=open("CalendarOutput.txt",'r')
-        lines=cal.readlines()
-        cal.close
-        for line in lines:
-            calSplit=line.split(',')
-            if calSplit[0][:-3]==time.strftime('%Y-%m-%d %H:%M'):
-                resetCalCheck=True
-                lines.remove(line)
-                message=IP+','+line[20:-1]
-                print("Scheduled message returned:",message)
-                break
-        cal=open("CalendarOutput.txt",'w')
-        for line in lines:
-            cal.write(line)
-        cal.close()
-    return message;
-
-
-
-def getLastValueTime(devID):
-    output="Empty"
-    with open("deviceLog.txt") as textFile:
-        lines = [line.split('\n\n')[0][:-1] for line in textFile]
-    for line in lines:
-        logSplit=line.split(",")
-        if logSplit[0]==devID:
-            output=logSplit[6];
-    return output;
+def checkScheduledEvents():
+    global currentTime,lastScheduleCheckTime
+    if currentTime>lastScheduleCheckTime:
+        with open("scheduledActions.txt") as textFile:
+            readLines = [line.split('\n')[0] for line in textFile]
+        i=0
+        deleteFlag=False
+        while i <len(readLines):
+            scheduleTime,msgType,devID,msg=readLines[i].split(',')
+            if int(scheduleTime)==currentTime: #Execute an event if the time is right
+                print("")
+                print("-- Scheduled action triggered:",readLines[i])
+                combined=msgType+','+devID+','+msg+','+IP                
+                processMessage(combined)
+                del readLines[i]
+                deleteFlag=True
+            elif int(scheduleTime)<currentTime: #if an old event was added to list
+                del readLines[i]
+                deleteFlag=True
+            else:
+                i=i+1
+        if deleteFlag:
+            cal=open("scheduledActions.txt",'w')
+            for line in readLines:
+                cal.write(line+'\n')
+        lastScheduleCheckTime=currentTime
+        
 
 
-#Setup lines
+#NO MORE MODULES BELOW HERE ----------- SETUP --------------------------------------
+
+#Setup lines 
 setTimes()
 refreshLocalIP()
 
 #File presence checks
-if os.path.isfile("calendarOutput.txt")==0:
-    log=open("calendarOutput.txt","a") #create if doesn't exist
+if os.path.isfile("scheduledActions.txt")==0:
+    log=open("scheduledActions.txt","a") #create if doesn't exist
     log.close()
-    print("calendarOutput.txt file created.")
+    print("scheduledActions.txt file created.")
 if os.path.isfile("actionList.txt")==0:
     log=open("actionList.txt","a") #create if doesn't exist
     log.close()
     print("actionList.txt file created.")
 appraiseDeviceLog()
 appraiseMsgLog()
-    
+logMsg('0','0','0') #To log when a reset hapens
 
 #General UDP setup
 sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -365,7 +361,8 @@ print("---- Now receiving on IP " + str(IP) + " at port " + str(PORT) + " ----")
 
 #Log what is read and occasionally respond
 while True:
-    setTimes()
-    checkForMessage()
     
+    checkForMessage()
+    setTimes()
+    checkScheduledEvents()
 
