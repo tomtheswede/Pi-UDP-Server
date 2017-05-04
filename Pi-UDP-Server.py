@@ -114,15 +114,15 @@ def processMessage(data):
             print("Message not processed since device ID",devID,"is not registered.")
         else:
             logRecent(devID,msg,devIP)
-            actionListComparision(devID)
+            actionListComparison(devID)
         
 
-def actionListComparision(devID):
+def actionListComparison(devID):
     with open("actionList.txt") as textFile:
         lines = [line.split('\n')[0] for line in textFile]
     for i in range(0,len(lines)):
         #print(lines[i][:-1])
-        actionSplit=lines[i][:-1].split(":")
+        actionSplit=lines[i].split(":")
         #print(actionSplit)
         #print(actionSplit[1].split(",")[0])
         if devID==actionSplit[1].split(",")[0]:
@@ -268,7 +268,7 @@ def logRecent(devID,msg,devIP):
                 print("Offline device has returned to the network with ID: ", devID)
             if logSplit[2]!=devIP:
                 #print(logSplit[2],"  ",devIP)
-                print("IP address has changed for the device with ID: ", devID)
+                print("IP address has changed to",devIP,"for the device with ID: ", devID)
     log=open("deviceLog.txt","w")
     for line in deviceLog:
         log.write(line + '\n')
@@ -276,7 +276,7 @@ def logRecent(devID,msg,devIP):
     #print('Full device log:',deviceLog)
 
 def regDevice(devID,msg,devIP,devName):
-    global deviceLog
+    global deviceLog,currentTime
     noMatch = True
     for i in range(0,len(deviceLog)):
         logSplit=deviceLog[i].split(",")
@@ -331,7 +331,36 @@ def checkScheduledEvents():
                 cal.write(line+'\n')
         lastScheduleCheckTime=currentTime
         
-
+def checkForMacChanges():
+    global deviceLog, currentTime
+    with open("ipLog.txt") as textFile:
+        lines = [line.split('\n')[0] for line in textFile]
+    for i in range(0,len(deviceLog)):
+        logSplit=deviceLog[i].split(",")
+        for ipline in lines:
+            ipSplit=ipline.split(",")
+            if logSplit[2]!=IP:
+                if logSplit[2]==ipSplit[0] and logSplit[3]=="No mac yet":
+                    deviceLog[i]=logSplit[0]+','+logSplit[1]+','+logSplit[2]+','+ipSplit[1]+','+logSplit[4]+','+'1'+','+str(currentTime)+','+logSplit[7]
+                    print("Device",logSplit[0],"has logged first mac address as",ipSplit[1])
+                    break
+                elif logSplit[3]==ipSplit[1] and logSplit[2]==ipSplit[0] and logSplit[5]=="1": #Online with same IP and mac as before
+                    deviceLog[i]=logSplit[0]+','+logSplit[1]+','+logSplit[2]+','+logSplit[3]+','+logSplit[4]+','+'1'+','+str(currentTime)+','+logSplit[7]
+                    break
+                elif logSplit[3]!=ipSplit[1] and logSplit[2]==ipSplit[0] and logSplit[5]=="1": #Online with same IP as before but with different Mac
+                    deviceLog[i]=logSplit[0]+','+logSplit[1]+','+logSplit[2]+','+ipSplit[1]+','+logSplit[4]+','+'1'+','+str(currentTime)+','+logSplit[7]
+                    print("Device",logSplit[0],"has changed IP address to",ipSplit[0])
+                    break
+                elif logSplit[5]=="1" and (int(logSplit[6])+20)<currentTime: #Offline with same IP and mac as before
+                    deviceLog[i]=logSplit[0]+','+logSplit[1]+','+logSplit[2]+','+ipSplit[1]+','+logSplit[4]+','+'0'+','+str(currentTime)+','+logSplit[7]
+                    print("Device",logSplit[0],"has left the network")
+                    processMessage('14,'+logSplit[0]+',255,'+logSplit[2])
+                    break
+    log=open("deviceLog.txt","w")
+    for line in deviceLog:
+        log.write(line + '\n')
+    log.close()
+    
 
 #NO MORE MODULES BELOW HERE ----------- SETUP --------------------------------------
 
@@ -365,4 +394,5 @@ while True:
     checkForMessage()
     setTimes()
     checkScheduledEvents()
+    checkForMacChanges()
 
