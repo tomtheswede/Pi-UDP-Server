@@ -1,4 +1,4 @@
-import socket, os, time, select
+import socket, os, time, select, math
 from datetime import datetime
 
 #Global variables
@@ -7,9 +7,11 @@ IP=""
 MAC=""
 entryNum=0
 devicelog=[]
+sysSettings=[]
 currentTime=0
 dayTime=0
 lastScheduleCheckTime=0
+lastSunTime=0
 
 def refreshLocalIP():
     global IP, MAC
@@ -25,6 +27,22 @@ def refreshLocalIP():
     MAC=MACstring[0:17]
     print("Local IP is",IP," with MAC of" + MAC)
 
+def appraiseSystemSettings():
+    global sysSettings, IP, MAC
+    nowTime=str(currentTime)
+    if os.path.isfile("sysSettings.txt")==0:
+        log=open("sysSettings.txt","a") #create if doesn't exist
+        registerLines='0,'+IP+',IP\n'\
+            '1,'+MAC+',MAC\n'\
+            '2,112,Longitude\n'\
+            '3,33.43,Lattitude\n'\
+            '4,8,Timezone\n'
+        log.write(registerLines)
+        log.close()
+        print("sysSettings.txt file created.")
+    with open("sysSettings.txt") as textFile:
+        sysSettings = [line.split('\n')[0] for line in textFile]
+
 def appraiseDeviceLog():
     global deviceLog, IP, MAC
     nowTime=str(currentTime)
@@ -35,10 +53,10 @@ def appraiseDeviceLog():
             '2,2,'+IP+','+MAC+','+str(dayTime)+',1,'+nowTime+',Day time\n'\
             '3,3,'+IP+','+MAC+','+'1'+',1,'+nowTime+',Network access\n'\
             '4,4,'+IP+','+MAC+','+'1'+',1,'+nowTime+',Internet access\n'\
-            '5,5,'+IP+','+MAC+','+str(123)+',1,'+nowTime+',Solar azimuth\n'\
-            '6,6,'+IP+','+MAC+','+str(23)+',1,'+nowTime+',Solar altitude\n'\
-            '7,7,'+IP+','+MAC+','+str(3)+',1,'+nowTime+',Lunar azimuth\n'\
-            '8,8,'+IP+','+MAC+','+str(13)+',1,'+nowTime+',Lunar altitude\n'\
+            '5,5,'+IP+','+MAC+','+str(123)+',1,'+nowTime+',Solar altitude\n'\
+            '6,6,'+IP+','+MAC+','+str(23)+',1,'+nowTime+',Solar azimuth\n'\
+            '7,7,'+IP+','+MAC+','+str(3)+',1,'+nowTime+',Lunar altitude\n'\
+            '8,8,'+IP+','+MAC+','+str(13)+',1,'+nowTime+',Lunar azimuth\n'\
             '9,9,'+IP+','+MAC+','+str(9)+',1,'+nowTime+',Sun rise/set\n'
         log.write(registerLines)
         log.close()
@@ -360,7 +378,46 @@ def checkForMacChanges():
     for line in deviceLog:
         log.write(line + '\n')
     log.close()
-    
+
+def checkForSunChanges():
+    global deviceLog, sysSettings, currentTime, lastSunTime
+    if currentTime>lastSunTime+180: #Trigger every 60 seconds
+        timeZone=int(sysSettings[4].split(',')[1])
+        gmtTime=currentTime
+        locTime=gmtTime+(timeZone/24)*86400   #Set local time variable
+        yearDay=math.floor(locTime/86400)-math.floor(math.floor(math.floor(locTime/86400)/365.25)*365.25)
+        timeD=360*(yearDay-81)/365
+        timeET=9.87*math.sin(math.radians(2*timeD))-7.53*math.cos(math.radians(timeD))-1.5*math.sin(math.radians(timeD))
+        declinationAngle=23.45*math.sin(math.radians((yearDay+284)/365*360))
+        longg=int(sysSettings[2].split(',')[1])
+        timeAST=(4*(15*round(longg/15)-longg)+timeET)*60+locTime
+        hourAngle=(((timeAST-math.floor(timeAST/86400)*86400)/60)-720)/4
+        lat=float(sysSettings[3].split(',')[1])
+        solarAltitude=math.degrees(math.asin(math.cos(math.radians(lat))*math.cos(math.radians(declinationAngle))*math.cos(math.radians(hourAngle))+math.sin(math.radians(lat))*math.sin(math.radians(declinationAngle)))) #solar altitude
+        solarAzimuth=math.degrees(math.acos((math.sin(math.radians(solarAltitude))*math.sin(math.radians(lat))-math.sin(math.radians(declinationAngle)))/(math.cos(math.radians(solarAltitude))*math.cos(math.radians(lat)))))*(signum(hourAngle)) #solar azimuth
+        #print(gmtTime,locTime,yearDay,timeD,timeET,declinationAngle,longg,timeAST,hourAngle,lat)
+        #print(longg,lat,"Solar altitude of",solarAltitude,"degrees and azimuth of",solarAzimuth,"degrees at time",currentTime,"at timezone",timeZone)
+        #print(deviceLog[5])
+        logSplit=deviceLog[5].split(",")
+        deviceLog[5]=logSplit[0]+','+logSplit[1]+','+logSplit[2]+','+logSplit[3]+','+str(round(solarAltitude,2))+','+'1'+','+str(currentTime)+','+logSplit[7]
+        logSplit=deviceLog[6].split(",")
+        deviceLog[6]=logSplit[0]+','+logSplit[1]+','+logSplit[2]+','+logSplit[3]+','+str(round(solarAzimuth,2))+','+'1'+','+str(currentTime)+','+logSplit[7]
+        sunsetIndex=int((solarAltitude+90)/3)
+        #print(sunsetIndex)
+        logSplit=deviceLog[9].split(",")
+        if logSplit[4]!=sunsetIndex:
+            processMessage('17,9,'+str(sunsetIndex)+','+IP)
+    log=open("deviceLog.txt","w")
+    for line in deviceLog:
+        log.write(line + '\n')
+    log.close()
+    lastSunTime=currentTime
+
+def signum(invar):
+    if invar<0:
+        return -1;
+    else:
+        return 1;
 
 #NO MORE MODULES BELOW HERE ----------- SETUP --------------------------------------
 
@@ -377,6 +434,7 @@ if os.path.isfile("actionList.txt")==0:
     log=open("actionList.txt","a") #create if doesn't exist
     log.close()
     print("actionList.txt file created.")
+appraiseSystemSettings()
 appraiseDeviceLog()
 appraiseMsgLog()
 logMsg('0','0','0') #To log when a reset hapens
@@ -395,4 +453,5 @@ while True:
     setTimes()
     checkScheduledEvents()
     checkForMacChanges()
+    checkForSunChanges()
 
